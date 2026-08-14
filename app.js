@@ -155,10 +155,13 @@ const PHASE_LABELS = {
   ended: "Bitti",
 };
 
+const AVATARS = ["?", "!", "#", "*", "@", "%", "&", "+", "1", "2", "3", "4"];
+
 const app = document.querySelector("#app");
 const local = {
   name: localStorage.getItem("impostor:name") || "",
   passwordHash: localStorage.getItem("impostor:passwordHash") || "",
+  avatar: localStorage.getItem("impostor:avatar") || "",
   firebaseConfig: readJson(localStorage.getItem("impostor:firebaseConfig")),
 };
 
@@ -174,6 +177,7 @@ const state = {
   error: "",
   copyMessage: "",
   timeoutResolving: false,
+  voteStartResolving: false,
   uiTimer: null,
   unsubscribers: [],
 };
@@ -373,6 +377,7 @@ function nameView() {
             <span>Kendi sifren</span>
             <input id="passwordInput" type="password" maxlength="40" autocomplete="new-password" placeholder="Sadece sen bil" />
           </label>
+          ${avatarPicker()}
           <button id="saveName">Devam et</button>
         </div>
       </aside>
@@ -415,6 +420,7 @@ function homeView() {
             <span>Kendi sifren</span>
             <input id="passwordInput" type="password" maxlength="40" placeholder="${local.passwordHash ? "Kayitli sifreyi korumak icin bos birak" : "Sifre belirle"}" />
           </label>
+          ${avatarPicker()}
           <button id="saveName">Bilgileri kaydet</button>
           <div class="divider"></div>
           <button id="createRoom" class="success">Oda olustur</button>
@@ -433,11 +439,19 @@ function homeView() {
 function lobbyStage(room, players, isHost) {
   const settings = room.settings || defaultSettings();
   const usedCount = Object.keys(room.usedWords || {}).length;
+  const activePlayers = players.filter((player) => player.online && !player.eliminated);
+  const readyCount = activePlayers.filter((player) => player.ready).length;
+  const everyoneReady = activePlayers.length >= 3 && readyCount === activePlayers.length;
+  const meReady = Boolean(room.players?.[state.uid]?.ready);
   return `
     <div class="game-stage">
       <div>
         <h2>Lobi hazir</h2>
-        <p class="muted">En az 3 kisi olunca oda sahibi oyunu baslatabilir. Bu odada ${usedCount} kelime oynandi.</p>
+        <p class="muted">${readyCount}/${activePlayers.length} kisi hazir. Bu odada ${usedCount} kelime oynandi.</p>
+      </div>
+      <div class="actions">
+        <button id="toggleReady" class="${meReady ? "ghost" : "success"}">${meReady ? "Hazir degilim" : "Hazirim"}</button>
+        <span class="muted">Oyun herkes hazir olunca baslatilabilir.</span>
       </div>
       ${
         isHost
@@ -471,7 +485,7 @@ function lobbyStage(room, players, isHost) {
           </div>
           <div class="actions">
             <button id="saveSettings" class="ghost">Ayarlari kaydet</button>
-            <button id="startGame" ${players.length < 3 ? "disabled" : ""}>Oyunu baslat</button>
+            <button id="startGame" ${!everyoneReady ? "disabled" : ""}>Oyunu baslat</button>
           </div>
         </div>
       `
@@ -481,9 +495,13 @@ function lobbyStage(room, players, isHost) {
   `;
 }
 
-function revealStage(isHost) {
+function revealStage() {
   const assignment = currentAssignment();
   const isImpostor = assignment?.role === "impostor";
+  const players = getPlayers(state.room).filter((player) => player.online && !player.eliminated);
+  const seen = state.room?.seenCards || {};
+  const seenCount = Object.keys(seen).filter((id) => players.some((player) => player.id === id)).length;
+  const meSeen = Boolean(seen[state.uid]);
   return `
     <div class="game-stage">
       <div class="role-card ${isImpostor ? "impostor" : "player"}">
@@ -493,19 +511,21 @@ function revealStage(isHost) {
         </div>
       </div>
       <div class="actions">
-        ${
-          isHost
-            ? `<button id="startDiscussion">Herkes gordu, tartismaya gec</button>`
-            : `<span class="muted">Herkes kartini gordugunde oda sahibi tartismayi baslatir.</span>`
-        }
+        <button id="confirmSeen" ${meSeen ? "disabled" : ""}>${meSeen ? "Gordum" : "Gordum"}</button>
+        <span class="muted">${seenCount}/${players.length} kisi kartini gordu. Herkes gorunce tartisma baslar.</span>
       </div>
     </div>
   `;
 }
 
-function discussionStage(room, isHost) {
+function discussionStage(room) {
   const isImpostor = currentAssignment()?.role === "impostor";
   const guessed = Boolean(state.myGuess);
+  const activePlayers = getPlayers(room).filter((player) => !player.eliminated);
+  const requests = room.voteStartRequests || {};
+  const requestCount = Object.keys(requests).filter((id) => activePlayers.some((player) => player.id === id)).length;
+  const needed = majority(activePlayers.length);
+  const requested = Boolean(requests[state.uid]);
   return `
     <div class="game-stage">
       <div>
@@ -529,7 +549,8 @@ function discussionStage(room, isHost) {
           : `<div class="notice">Impostoru bulmaya calis. Oylama baslayana kadar kararini netlestir.</div>`
       }
       <div class="actions">
-        ${isHost ? `<button id="beginVote">Oylamaya gec</button>` : `<span class="muted">Oylamayi oda sahibi baslatir.</span>`}
+        <button id="requestVoteStart" ${requested ? "disabled" : ""}>${requested ? "Oylama istendi" : "Oylama iste"}</button>
+        <span class="muted">${requestCount}/${activePlayers.length} istek geldi. Oylamaya gecmek icin ${needed} kisi gerekiyor.</span>
       </div>
     </div>
   `;
@@ -568,6 +589,7 @@ function votingStage(room, players) {
 function endedStage(room, isHost) {
   const result = room.result || {};
   const isPlayersWin = result.winner === "players";
+  const impostorNames = result.impostorNames || getImpostorNames(room);
   return `
     <div class="game-stage">
       <div class="notice ${isPlayersWin ? "good-note" : "danger-note"}">
@@ -576,6 +598,7 @@ function endedStage(room, isHost) {
       </div>
       <div class="chip-row">
         <span class="chip">Kelime <strong>${escapeHtml(room.meta?.word || "?")}</strong></span>
+        ${impostorNames.length ? `<span class="chip">Impostor <strong>${escapeHtml(impostorNames.join(", "))}</strong></span>` : ""}
         ${result.eliminatedName ? `<span class="chip">Atilan <strong>${escapeHtml(result.eliminatedName)}</strong></span>` : ""}
       </div>
       <div class="actions">
@@ -596,12 +619,16 @@ function playersList(players, room, isHost) {
           (player) => `
         <div class="player">
           <div class="player-name">
-            <span class="dot ${player.online ? "on" : ""}"></span>
+            <span class="avatar ${player.online ? "on" : ""}">${escapeHtml(player.avatar || avatarForName(player.name))}</span>
             <span>${escapeHtml(player.name)}</span>
+            <span class="score-pill">${player.score || 0}</span>
           </div>
           <div class="chip-row">
             ${player.id === hostId ? `<span class="tag">Sahip</span>` : ""}
+            ${room?.meta?.phase === "lobby" && player.ready ? `<span class="tag good-tag">Hazir</span>` : ""}
+            ${room?.meta?.phase === "reveal" && room.seenCards?.[player.id] ? `<span class="tag good-tag">Gordu</span>` : ""}
             ${player.eliminated ? `<span class="tag">Atilmis</span>` : ""}
+            ${isHost && player.id !== hostId ? `<button class="mini ghost" data-transfer-host="${player.id}">Sahip yap</button>` : ""}
             ${isHost && player.id !== hostId ? `<button class="mini danger" data-kick="${player.id}">At</button>` : ""}
           </div>
         </div>
@@ -622,13 +649,18 @@ function bindEvents() {
   bind("#copyCode", "click", copyCode);
   bind("#saveSettings", "click", saveSettings);
   bind("#startGame", "click", startGame);
-  bind("#startDiscussion", "click", () => setPhase("discussion"));
-  bind("#beginVote", "click", beginVote);
+  bind("#toggleReady", "click", toggleReady);
+  bind("#confirmSeen", "click", confirmSeenCard);
+  bind("#requestVoteStart", "click", requestVoteStart);
   bind("#submitGuess", "click", submitGuess);
   bind("#newRound", "click", resetToLobby);
 
   document.querySelectorAll("[data-kick]").forEach((button) => {
     button.addEventListener("click", () => kickPlayer(button.dataset.kick));
+  });
+
+  document.querySelectorAll("[data-transfer-host]").forEach((button) => {
+    button.addEventListener("click", () => transferHost(button.dataset.transferHost));
   });
 
   document.querySelectorAll("[data-vote]").forEach((button) => {
@@ -734,9 +766,16 @@ async function joinRoom() {
 async function leaveRoom() {
   if (!state.roomCode || !state.firebase) return;
   const { ref, update } = state.firebase.dbModule;
+  const nextHost = isHost() ? pickNextHost(getActivePlayers(state.room).filter((player) => player.id !== state.uid)) : null;
   await update(ref(state.firebase.db, `rooms/${state.roomCode}/players/${state.uid}`), {
     online: false,
   });
+  if (nextHost) {
+    await updateRoom({
+      "meta/hostId": nextHost.id,
+      "meta/updatedAt": Date.now(),
+    });
+  }
   cleanupSubscriptions();
   state.roomCode = "";
   state.room = null;
@@ -745,6 +784,18 @@ async function leaveRoom() {
   state.myGuess = null;
   sessionStorage.removeItem("impostor:room");
   render();
+}
+
+async function transferHost(playerId) {
+  if (!isHost() || !playerId || playerId === state.uid) return;
+  const target = getActivePlayers(state.room).find((player) => player.id === playerId);
+  if (!target) return;
+
+  await updateRoom({
+    "meta/hostId": target.id,
+    "meta/updatedAt": Date.now(),
+  });
+  state.copyMessage = `${target.name} oda sahibi oldu.`;
 }
 
 async function kickPlayer(playerId) {
@@ -800,6 +851,15 @@ async function saveSettings() {
   });
 }
 
+async function toggleReady() {
+  if (!state.roomCode || state.room?.meta?.phase !== "lobby") return;
+  const ready = !state.room?.players?.[state.uid]?.ready;
+  await updateRoom({
+    [`players/${state.uid}/ready`]: ready,
+    "meta/updatedAt": Date.now(),
+  });
+}
+
 async function startGame() {
   if (!isHost()) return;
   const settings = readSettingsFromForm(state.room?.settings || defaultSettings());
@@ -810,10 +870,17 @@ async function startGame() {
   }
 
   const players = getPlayers(state.room).filter((player) => player.online && !player.eliminated);
+  const everyoneReady = players.length >= 3 && players.every((player) => player.ready);
   const impostorCount = Math.min(settings.impostorCount || 1, Math.max(1, players.length - 2));
 
   if (players.length < 3) {
     state.error = "Oyun icin en az 3 kisi gerekiyor.";
+    render();
+    return;
+  }
+
+  if (!everyoneReady) {
+    state.error = "Oyunu baslatmak icin herkes hazir olmali.";
     render();
     return;
   }
@@ -836,6 +903,8 @@ async function startGame() {
     assignmentsPublic: assignments,
     guessesPublic: null,
     votesPublic: null,
+    voteStartRequests: null,
+    seenCards: null,
     [`usedWords/${wordKey(word)}`]: true,
     voteReceipts: null,
     guessReceipts: null,
@@ -859,21 +928,56 @@ async function setPhase(phase) {
   if (!isHost()) return;
   await updateRoom({
     ...phaseMetaPatch(phase),
+    ...(phase === "discussion" ? { voteStartRequests: null } : {}),
+    "meta/updatedAt": Date.now(),
+  });
+}
+
+async function confirmSeenCard() {
+  if (!state.roomCode || state.room?.meta?.phase !== "reveal") return;
+  await updateRoom({
+    [`seenCards/${state.uid}`]: true,
+    "meta/updatedAt": Date.now(),
+  });
+  setTimeout(resolveSeenCards, 80);
+}
+
+async function resolveSeenCards() {
+  const room = state.room;
+  if (!room || room.meta?.phase !== "reveal") return;
+  const players = getPlayers(room).filter((player) => player.online && !player.eliminated);
+  const seen = room.seenCards || {};
+  const allSeen = players.length > 0 && players.every((player) => seen[player.id]);
+  if (!allSeen) return;
+
+  await updateRoom({
+    seenCards: null,
+    ...phaseMetaPatch("discussion"),
+    voteStartRequests: null,
     "meta/updatedAt": Date.now(),
   });
 }
 
 async function beginVote() {
-  if (!isHost()) return;
   await updateRoom({
     "voteReceipts/current": null,
     "votesPublic/current": null,
+    voteStartRequests: null,
     ...phaseMetaPatch("voting"),
     "meta/updatedAt": Date.now(),
   });
   await bestEffortRootUpdate({
     [`votes/${state.roomCode}/current`]: null,
   });
+}
+
+async function requestVoteStart() {
+  if (!state.roomCode || state.room?.meta?.phase !== "discussion") return;
+  await updateRoom({
+    [`voteStartRequests/${state.uid}`]: true,
+    "meta/updatedAt": Date.now(),
+  });
+  setTimeout(resolveVoteStartRequests, 80);
 }
 
 async function submitGuess() {
@@ -896,6 +1000,13 @@ async function submitGuess() {
   await bestEffortRootUpdate({
     [`guesses/${state.roomCode}/${state.uid}`]: guessRecord,
   });
+
+  if (correct) {
+    await applyScoreAndResult(
+      scorePatchFor("impostor-guess", { impostorIds: [state.uid] }),
+      resultUpdate("impostor", "Impostor kazandi", `${local.name} kelimeyi dogru tahmin etti.`),
+    );
+  }
 }
 
 async function writePrivateVote(targetId) {
@@ -926,7 +1037,7 @@ async function castVote(targetId) {
 async function resolveGuesses() {
   if (!isHost()) return;
   const room = state.room;
-  if (!room || room.meta?.phase !== "discussion") return;
+  if (!room || room.meta?.phase !== "discussion" || room.result) return;
   const guesses = await readGuesses();
   const correctEntry = Object.entries(guesses).find(([, guess]) => guess?.correct);
   if (!correctEntry) return;
@@ -936,6 +1047,24 @@ async function resolveGuesses() {
   await updateRoom(
     resultUpdate("impostor", "Impostor kazandi", `${player?.name || "Impostor"} kelimeyi dogru tahmin etti.`),
   );
+}
+
+async function resolveVoteStartRequests() {
+  if (state.voteStartResolving) return;
+  const room = state.room;
+  if (!room || room.meta?.phase !== "discussion") return;
+  const activePlayers = getPlayers(room).filter((player) => !player.eliminated);
+  const requests = room.voteStartRequests || {};
+  const requestCount = Object.keys(requests).filter((id) => activePlayers.some((player) => player.id === id)).length;
+
+  if (requestCount >= majority(activePlayers.length)) {
+    state.voteStartResolving = true;
+    try {
+      await beginVote();
+    } finally {
+      state.voteStartResolving = false;
+    }
+  }
 }
 
 async function resolveVotes() {
@@ -978,8 +1107,12 @@ async function eliminateByVote(eliminatedId) {
   const assignment = await readAssignment(eliminatedId);
   const eliminated = activePlayers.find((player) => player.id === eliminatedId);
   const playersWon = assignment?.role === "impostor";
+  const scorePatch = playersWon
+    ? scorePatchFor("players-found", { impostorIds: [eliminatedId] })
+    : scorePatchFor("wrong-elimination", { eliminatedId });
   await updateRoom({
     [`players/${eliminatedId}/eliminated`]: true,
+    ...scorePatch,
     ...resultUpdate(
       playersWon ? "players" : "impostor",
       playersWon ? "Oyuncular kazandi" : "Impostor kazandi",
@@ -1021,6 +1154,7 @@ async function resetToLobby() {
   getPlayers(state.room).forEach((player) => {
     playerUpdates[`players/${player.id}/eliminated`] = false;
     playerUpdates[`players/${player.id}/assignment`] = null;
+    playerUpdates[`players/${player.id}/ready`] = false;
   });
 
   await updateRoom({
@@ -1029,6 +1163,8 @@ async function resetToLobby() {
     assignmentsPublic: null,
     guessesPublic: null,
     votesPublic: null,
+    voteStartRequests: null,
+    seenCards: null,
     guessReceipts: null,
     voteReceipts: null,
     "meta/phase": "lobby",
@@ -1082,6 +1218,7 @@ async function subscribeRoom(code) {
         render();
         return;
       }
+      ensureHostPresent();
       if (state.room?.meta?.phase === "lobby") {
         state.assignment = null;
         state.myVote = null;
@@ -1098,7 +1235,11 @@ async function subscribeRoom(code) {
         state.myGuess = state.room.guessesPublic[state.uid];
       }
       render();
-      if (state.room?.meta?.phase === "discussion") resolveGuesses();
+      if (state.room?.meta?.phase === "reveal") resolveSeenCards();
+      if (state.room?.meta?.phase === "discussion") {
+        resolveGuesses();
+        resolveVoteStartRequests();
+      }
       if (state.room?.meta?.phase === "voting") resolveVotes();
       resolvePhaseTimeout();
     }),
@@ -1149,6 +1290,13 @@ async function updateRoom(patch) {
 async function updateRoot(patch) {
   const { ref, update } = state.firebase.dbModule;
   await update(ref(state.firebase.db), patch);
+}
+
+async function applyScoreAndResult(scorePatch, resultPatch) {
+  await updateRoom({
+    ...scorePatch,
+    ...resultPatch,
+  });
 }
 
 async function bestEffortRootUpdate(patch) {
@@ -1242,6 +1390,7 @@ function resultUpdate(winner, title, body, eliminatedName = "") {
       title,
       body,
       eliminatedName,
+      impostorNames: getImpostorNames(state.room),
       at: Date.now(),
     },
     "meta/phase": "ended",
@@ -1267,6 +1416,43 @@ function roleReminder(phase) {
   if (!assignment || phase === "lobby" || phase === "home") return "";
   if (assignment.role === "impostor") return "Rolun: Impostor";
   return `Kelimen: ${assignment.word || ""}`;
+}
+
+function scorePatchFor(type, context = {}) {
+  const players = getPlayers(state.room);
+  const patch = {};
+
+  if (type === "impostor-guess") {
+    context.impostorIds?.forEach((id) => {
+      patch[`players/${id}/score`] = playerScore(id) + 2;
+    });
+  }
+
+  if (type === "players-found") {
+    players.forEach((player) => {
+      const assignment = assignmentFromRoom(player.id);
+      if (assignment?.role !== "impostor") {
+        patch[`players/${player.id}/score`] = playerScore(player.id) + 1;
+      }
+    });
+  }
+
+  if (type === "wrong-elimination") {
+    players.forEach((player) => {
+      const assignment = assignmentFromRoom(player.id);
+      if (assignment?.role === "impostor") {
+        patch[`players/${player.id}/score`] = playerScore(player.id) + 1;
+      } else {
+        patch[`players/${player.id}/score`] = Math.max(0, playerScore(player.id) - 1);
+      }
+    });
+  }
+
+  return patch;
+}
+
+function playerScore(playerId) {
+  return Number(state.room?.players?.[playerId]?.score || 0);
 }
 
 function phaseMetaPatch(phase) {
@@ -1347,15 +1533,45 @@ function defaultSettings() {
 }
 
 function playerRecord() {
+  const existing = state.room?.players?.[state.uid] || {};
   return {
+    ...existing,
     name: local.name,
+    avatar: local.avatar || existing.avatar || avatarForName(local.name),
     passwordHash: local.passwordHash,
     identityKey: identityKey(),
     online: true,
-    eliminated: false,
-    kicked: false,
+    score: Number(existing.score || 0),
+    ready: Boolean(existing.ready),
+    eliminated: Boolean(existing.eliminated),
+    kicked: Boolean(existing.kicked),
     lastSeen: Date.now(),
   };
+}
+
+function avatarPicker() {
+  const selected = local.avatar || avatarForName(local.name || "oyuncu");
+  return `
+    <div class="field">
+      <span>Avatar</span>
+      <div class="avatar-picker">
+        ${AVATARS.map(
+          (avatar) => `
+            <label class="avatar-choice ${avatar === selected ? "selected" : ""}">
+              <input type="radio" name="avatarChoice" value="${escapeHtml(avatar)}" ${avatar === selected ? "checked" : ""} />
+              <span>${escapeHtml(avatar)}</span>
+            </label>
+          `,
+        ).join("")}
+      </div>
+    </div>
+  `;
+}
+
+function avatarForName(name) {
+  const clean = cleanName(name || "");
+  if (!clean) return AVATARS[0];
+  return clean[0].toLocaleUpperCase("tr");
 }
 
 function getPlayers(room) {
@@ -1363,6 +1579,43 @@ function getPlayers(room) {
     .map(([id, player]) => ({ id, ...player }))
     .filter((player) => !player.kicked)
     .sort((a, b) => (a.name || "").localeCompare(b.name || "", "tr"));
+}
+
+function getActivePlayers(room) {
+  return getPlayers(room).filter((player) => player.online && !player.kicked);
+}
+
+function pickNextHost(players, seed = Math.random()) {
+  if (!players.length) return null;
+  const sorted = [...players].sort((a, b) => a.id.localeCompare(b.id));
+  const seedText = String(seed);
+  const index = simpleHash(seedText).split("").reduce((sum, char) => sum + char.charCodeAt(0), 0) % sorted.length;
+  return sorted[index];
+}
+
+async function ensureHostPresent() {
+  const room = state.room;
+  if (!room?.meta?.hostId || room.players?.[room.meta.hostId]?.online) return;
+  const activePlayers = getActivePlayers(room);
+  if (!activePlayers.length) return;
+  const nextHost = pickNextHost(activePlayers, `${room.meta.hostId}:${room.meta.updatedAt}:${room.meta.round}`);
+  if (!nextHost || nextHost.id !== state.uid) return;
+
+  try {
+    await updateRoom({
+      "meta/hostId": nextHost.id,
+      "meta/updatedAt": Date.now(),
+    });
+  } catch {
+    state.error = "Oda sahibi devredilirken sorun oldu.";
+    render();
+  }
+}
+
+function getImpostorNames(room) {
+  return getPlayers(room)
+    .filter((player) => assignmentFromRoom(player.id)?.role === "impostor")
+    .map((player) => player.name || "Impostor");
 }
 
 function isHost() {
@@ -1379,6 +1632,7 @@ function ensureReady() {
 function saveIdentityFromCurrentInput({ requirePassword = false } = {}) {
   const input = document.querySelector("#nameInput");
   const passwordInput = document.querySelector("#passwordInput");
+  const avatarInput = document.querySelector("input[name='avatarChoice']:checked");
   const nextName = cleanName(input?.value || "");
   const nextPassword = passwordInput?.value || "";
 
@@ -1402,6 +1656,8 @@ function saveIdentityFromCurrentInput({ requirePassword = false } = {}) {
 
   local.name = nextName;
   localStorage.setItem("impostor:name", nextName);
+  local.avatar = avatarInput?.value || local.avatar || avatarForName(nextName);
+  localStorage.setItem("impostor:avatar", local.avatar);
 
   if (nextPassword) {
     local.passwordHash = simpleHash(nextPassword);
