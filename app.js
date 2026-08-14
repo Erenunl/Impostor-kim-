@@ -19,6 +19,132 @@ const DEFAULT_WORDS = [
   "uzay gemisi",
   "polis merkezi",
   "spor salonu",
+  "metro",
+  "akvaryum",
+  "hayvanat bahcesi",
+  "müze",
+  "tiyatro",
+  "konser salonu",
+  "basketbol sahasi",
+  "futbol stadyumu",
+  "yuzme havuzu",
+  "berber",
+  "kuafor",
+  "eczane",
+  "pastane",
+  "kahveci",
+  "kitapci",
+  "avm",
+  "oyuncakci",
+  "benzinlik",
+  "oto yikama",
+  "tamirci",
+  "mahkeme",
+  "belediye",
+  "postane",
+  "banka",
+  "ofis",
+  "fabrika",
+  "insaat alani",
+  "ciftlik",
+  "sera",
+  "orman",
+  "dag evi",
+  "magara",
+  "selale",
+  "ada",
+  "liman",
+  "denizalti",
+  "korsan gemisi",
+  "askeri üs",
+  "hapishane",
+  "laboratuvar",
+  "robot fabrikasi",
+  "zombi siginagi",
+  "perili kosk",
+  "sihir okulu",
+  "kraliyet sarayi",
+  "antik tapinak",
+  "piramit",
+  "arkeoloji kazi alani",
+  "film seti",
+  "haber stüdyosu",
+  "radyo istasyonu",
+  "gece kulubu",
+  "karaoke bar",
+  "dondurmaci",
+  "pizzaci",
+  "sushi restorani",
+  "kebapci",
+  "okul kantini",
+  "sinif",
+  "yurt",
+  "anaokulu",
+  "veteriner",
+  "dis hekimi",
+  "ambulans",
+  "itfaiye",
+  "otobus",
+  "ucak",
+  "balon",
+  "helikopter",
+  "taksi",
+  "bisikletci",
+  "tekne turu",
+  "kruvaziyer",
+  "marina",
+  "spa",
+  "hamam",
+  "sauna",
+  "dovme studyosu",
+  "terzi",
+  "fotograf studyosu",
+  "düğün",
+  "dogum gunu partisi",
+  "piknik",
+  "barbeku",
+  "kamp atesi",
+  "sirk",
+  "kaçış odasi",
+  "laser tag",
+  "bowling salonu",
+  "bilardo salonu",
+  "internet kafe",
+  "espor arenasi",
+  "satranç kulubu",
+  "resim atolyasi",
+  "mutfak atolyasi",
+  "dans kursu",
+  "dil kursu",
+  "seminer salonu",
+  "konferans",
+  "secim sandigi",
+  "pazar yeri",
+  "bit pazari",
+  "balik hali",
+  "kasap",
+  "manav",
+  "fırın",
+  "çiçekçi",
+  "mezarlik",
+  "dini mekan",
+  "tren",
+  "feribot",
+  "otoban",
+  "sinir kapisi",
+  "otel lobisi",
+  "otel odasi",
+  "teras",
+  "catı",
+  "bodrum",
+  "asansor",
+  "gizli oda",
+  "hazine odasi",
+  "uzay istasyonu",
+  "ay üssü",
+  "mars kolonisi",
+  "zaman makinesi",
+  "sanal gerçeklik merkezi",
 ];
 
 const PHASE_LABELS = {
@@ -302,11 +428,12 @@ function homeView() {
 
 function lobbyStage(room, players, isHost) {
   const settings = room.settings || defaultSettings();
+  const usedCount = Object.keys(room.usedWords || {}).length;
   return `
     <div class="game-stage">
       <div>
         <h2>Lobi hazir</h2>
-        <p class="muted">En az 3 kisi olunca oda sahibi oyunu baslatabilir.</p>
+        <p class="muted">En az 3 kisi olunca oda sahibi oyunu baslatabilir. Bu odada ${usedCount} kelime oynandi.</p>
       </div>
       ${
         isHost
@@ -680,7 +807,7 @@ async function startGame() {
     return;
   }
 
-  const word = pick(settings.words || DEFAULT_WORDS);
+  const word = pickUnusedWord(settings.words || DEFAULT_WORDS, state.room?.usedWords || {});
   const impostors = shuffle(players).slice(0, impostorCount).map((player) => player.id);
   const assignments = {};
   players.forEach((player) => {
@@ -692,6 +819,7 @@ async function startGame() {
 
   await updateRoom({
     settings,
+    [`usedWords/${wordKey(word)}`]: true,
     voteReceipts: null,
     result: null,
     "meta/word": word,
@@ -1267,6 +1395,16 @@ function shuffle(items) {
 
 function pick(items) {
   return items[Math.floor(Math.random() * items.length)];
+}
+
+function pickUnusedWord(words, usedWords) {
+  const cleanWords = [...new Set(words.map((word) => word.trim()).filter(Boolean))];
+  const unused = cleanWords.filter((word) => !usedWords?.[wordKey(word)]);
+  return pick(unused.length ? unused : cleanWords);
+}
+
+function wordKey(word) {
+  return normalizeGuess(word).replace(/[^a-z0-9]+/g, "-").replace(/^-|-$/g, "") || "kelime";
 }
 
 function isUsableConfig(config) {
