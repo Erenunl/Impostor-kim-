@@ -559,9 +559,11 @@ function discussionStage(room) {
 function votingStage(room, players) {
   const voteReceipts = room.voteReceipts?.current || {};
   const activePlayers = players.filter((player) => !player.eliminated);
-  const voteCount = Object.keys(voteReceipts).filter((id) => activePlayers.some((player) => player.id === id)).length;
+  const voteCount = Object.entries(voteReceipts).filter(
+    ([id, receipt]) => activePlayers.some((player) => player.id === id) && isCurrentRoundRecord(receipt),
+  ).length;
   const needed = majority(activePlayers.length);
-  const myVote = state.myVote?.targetId || "";
+  const myVote = isCurrentRoundRecord(state.myVote) ? state.myVote?.targetId || "" : "";
 
   return `
     <div class="game-stage">
@@ -886,7 +888,7 @@ async function startGame() {
   }
 
   const word = pickUnusedWord(settings.words || DEFAULT_WORDS, state.room?.usedWords || {});
-  const impostors = shuffle(players).slice(0, impostorCount).map((player) => player.id);
+  const impostors = pickImpostors(players, impostorCount, state.room?.meta?.lastImpostorIds || []);
   const assignments = {};
   const playerAssignmentUpdates = {};
   players.forEach((player) => {
@@ -913,10 +915,13 @@ async function startGame() {
     "meta/phase": "reveal",
     "meta/phaseEndsAt": null,
     "meta/round": (state.room.meta?.round || 0) + 1,
+    "meta/lastImpostorIds": impostors,
     "meta/updatedAt": Date.now(),
   });
 
   state.assignment = assignments[state.uid] || null;
+  state.myVote = null;
+  state.myGuess = null;
   await bestEffortRootUpdate({
     [`assignments/${state.roomCode}`]: assignments,
     [`guesses/${state.roomCode}`]: null,
@@ -1012,11 +1017,15 @@ async function submitGuess() {
 async function writePrivateVote(targetId) {
   const voteRecord = {
     targetId,
+    round: state.room?.meta?.round || 0,
     at: Date.now(),
   };
   await updateRoom({
     [`votesPublic/current/${state.uid}`]: voteRecord,
-    [`voteReceipts/current/${state.uid}`]: true,
+    [`voteReceipts/current/${state.uid}`]: {
+      round: state.room?.meta?.round || 0,
+      at: Date.now(),
+    },
     "meta/updatedAt": Date.now(),
   });
   await bestEffortRootUpdate({
@@ -1228,7 +1237,7 @@ async function subscribeRoom(code) {
       if (fallbackAssignment) {
         state.assignment = fallbackAssignment;
       }
-      if (state.room?.votesPublic?.current?.[state.uid]) {
+      if (isCurrentRoundRecord(state.room?.votesPublic?.current?.[state.uid])) {
         state.myVote = state.room.votesPublic.current[state.uid];
       }
       if (state.room?.guessesPublic?.[state.uid]) {
@@ -1254,7 +1263,8 @@ async function subscribeRoom(code) {
 
   state.unsubscribers.push(
     onValue(ref(state.firebase.db, `votes/${code}/current/${state.uid}`), (snapshot) => {
-      state.myVote = snapshot.val() || state.room?.votesPublic?.current?.[state.uid] || null;
+      const nextVote = snapshot.val() || state.room?.votesPublic?.current?.[state.uid] || null;
+      state.myVote = isCurrentRoundRecord(nextVote) ? nextVote : null;
       render();
     }),
   );
@@ -1311,9 +1321,9 @@ async function readVotes() {
   const { ref, get } = state.firebase.dbModule;
   try {
     const snapshot = await get(ref(state.firebase.db, `votes/${state.roomCode}/current`));
-    return snapshot.val() || state.room?.votesPublic?.current || {};
+    return currentRoundRecords(snapshot.val() || state.room?.votesPublic?.current || {});
   } catch {
-    return state.room?.votesPublic?.current || {};
+    return currentRoundRecords(state.room?.votesPublic?.current || {});
   }
 }
 
@@ -1616,6 +1626,24 @@ function getImpostorNames(room) {
   return getPlayers(room)
     .filter((player) => assignmentFromRoom(player.id)?.role === "impostor")
     .map((player) => player.name || "Impostor");
+}
+
+function pickImpostors(players, count, lastImpostorIds = []) {
+  const last = new Set(lastImpostorIds);
+  const freshPool = players.filter((player) => !last.has(player.id));
+  const primaryPool = freshPool.length >= count ? freshPool : players;
+  return shuffle(primaryPool)
+    .slice(0, count)
+    .map((player) => player.id);
+}
+
+function currentRoundRecords(records) {
+  return Object.fromEntries(Object.entries(records || {}).filter(([, record]) => isCurrentRoundRecord(record)));
+}
+
+function isCurrentRoundRecord(record) {
+  if (!record || typeof record !== "object") return false;
+  return Number(record.round || -1) === Number(state.room?.meta?.round || 0);
 }
 
 function isHost() {
