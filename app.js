@@ -32,6 +32,7 @@ const PHASE_LABELS = {
 const app = document.querySelector("#app");
 const local = {
   name: localStorage.getItem("impostor:name") || "",
+  passwordHash: localStorage.getItem("impostor:passwordHash") || "",
   firebaseConfig: readJson(localStorage.getItem("impostor:firebaseConfig")),
 };
 
@@ -46,6 +47,8 @@ const state = {
   loading: true,
   error: "",
   copyMessage: "",
+  timeoutResolving: false,
+  uiTimer: null,
   unsubscribers: [],
 };
 
@@ -130,6 +133,7 @@ function render() {
   `;
 
   bindEvents();
+  syncUiTimer();
 }
 
 function loadingView() {
@@ -204,7 +208,7 @@ function gameView({ room, players, me, isHost, phase }) {
             </div>
             <div class="room-code">${escapeHtml(state.roomCode)}</div>
           </div>
-          ${playersList(players, room)}
+          ${playersList(players, room, isHost)}
           <div class="divider"></div>
           <div class="actions">
             <button class="ghost" id="copyCode">Kodu kopyala</button>
@@ -234,6 +238,10 @@ function nameView() {
           <label class="field">
             <span>Ismin</span>
             <input id="nameInput" maxlength="22" autocomplete="nickname" placeholder="Mesela Kerem" />
+          </label>
+          <label class="field">
+            <span>Kendi sifren</span>
+            <input id="passwordInput" type="password" maxlength="40" autocomplete="new-password" placeholder="Sadece sen bil" />
           </label>
           <button id="saveName">Devam et</button>
         </div>
@@ -273,7 +281,11 @@ function homeView() {
             <span>Ismin</span>
             <input id="nameInput" maxlength="22" value="${escapeHtml(local.name)}" />
           </label>
-          <button id="saveName">Ismi kaydet</button>
+          <label class="field">
+            <span>Kendi sifren</span>
+            <input id="passwordInput" type="password" maxlength="40" placeholder="${local.passwordHash ? "Kayitli sifreyi korumak icin bos birak" : "Sifre belirle"}" />
+          </label>
+          <button id="saveName">Bilgileri kaydet</button>
           <div class="divider"></div>
           <button id="createRoom" class="success">Oda olustur</button>
           <div class="divider"></div>
@@ -312,6 +324,20 @@ function lobbyStage(room, players, isHost) {
               <option value="2" ${settings.impostorCount === 2 ? "selected" : ""}>2 impostor</option>
             </select>
           </label>
+          <label class="check-field">
+            <input id="timerEnabled" type="checkbox" ${settings.timerEnabled ? "checked" : ""} />
+            <span>Sureli oyun kullan</span>
+          </label>
+          <div class="split">
+            <label class="field">
+              <span>Tartisma suresi, dakika</span>
+              <input id="discussionMinutes" type="number" min="1" max="30" value="${Math.round((settings.discussionSeconds || 300) / 60)}" />
+            </label>
+            <label class="field">
+              <span>Oylama suresi, saniye</span>
+              <input id="votingSeconds" type="number" min="15" max="300" value="${settings.votingSeconds || 60}" />
+            </label>
+          </div>
           <div class="actions">
             <button id="saveSettings" class="ghost">Ayarlari kaydet</button>
             <button id="startGame" ${players.length < 3 ? "disabled" : ""}>Oyunu baslat</button>
@@ -354,6 +380,7 @@ function discussionStage(room, isHost) {
         <h2>Tartisma zamani</h2>
         <p class="muted">Sirayla konusun, ipucu verin, ama kelimeyi direkt soylemeyin.</p>
       </div>
+      ${timerNotice(room)}
       ${
         isImpostor
           ? `
@@ -389,6 +416,7 @@ function votingStage(room, players) {
         <h2>Gizli oylama</h2>
         <p class="muted">${voteCount}/${activePlayers.length} oy geldi. Birini atmak icin ${needed} oy gerekiyor.</p>
       </div>
+      ${timerNotice(room)}
       <div class="vote-list">
         ${activePlayers
           .map(
@@ -425,7 +453,7 @@ function endedStage(room, isHost) {
   `;
 }
 
-function playersList(players, room) {
+function playersList(players, room, isHost) {
   const hostId = room?.meta?.hostId;
   if (!players.length) return `<p class="muted">Henuz kimse yok.</p>`;
 
@@ -442,6 +470,7 @@ function playersList(players, room) {
           <div class="chip-row">
             ${player.id === hostId ? `<span class="tag">Sahip</span>` : ""}
             ${player.eliminated ? `<span class="tag">Atilmis</span>` : ""}
+            ${isHost && player.id !== hostId ? `<button class="mini danger" data-kick="${player.id}">At</button>` : ""}
           </div>
         </div>
       `,
@@ -465,6 +494,10 @@ function bindEvents() {
   bind("#beginVote", "click", beginVote);
   bind("#submitGuess", "click", submitGuess);
   bind("#newRound", "click", resetToLobby);
+
+  document.querySelectorAll("[data-kick]").forEach((button) => {
+    button.addEventListener("click", () => kickPlayer(button.dataset.kick));
+  });
 
   document.querySelectorAll("[data-vote]").forEach((button) => {
     button.addEventListener("click", () => castVote(button.dataset.vote));
@@ -508,16 +541,7 @@ function clearConfig() {
 }
 
 async function saveName() {
-  const input = document.querySelector("#nameInput");
-  const nextName = cleanName(input?.value || "");
-  if (!nextName) {
-    state.error = "Oyuna girmek icin bir isim yazmalisin.";
-    render();
-    return;
-  }
-
-  local.name = nextName;
-  localStorage.setItem("impostor:name", nextName);
+  if (!saveIdentityFromCurrentInput({ requirePassword: true })) return;
   state.error = "";
 
   if (state.roomCode && state.firebase) await upsertPlayer(state.roomCode);
@@ -526,8 +550,7 @@ async function saveName() {
 
 async function createRoom() {
   if (!ensureReady()) return;
-  await saveNameFromCurrentInput();
-  if (!local.name) return;
+  if (!saveIdentityFromCurrentInput({ requirePassword: true })) return;
 
   const code = await uniqueCode();
   const now = Date.now();
@@ -553,8 +576,7 @@ async function createRoom() {
 
 async function joinRoom() {
   if (!ensureReady()) return;
-  await saveNameFromCurrentInput();
-  if (!local.name) return;
+  if (!saveIdentityFromCurrentInput({ requirePassword: true })) return;
 
   const input = document.querySelector("#joinCode");
   const code = normalizeCode(input?.value || "");
@@ -570,6 +592,8 @@ async function joinRoom() {
     render();
     return;
   }
+
+  if (!(await canUseIdentityInRoom(code))) return;
 
   await upsertPlayer(code);
   await subscribeRoom(code);
@@ -589,6 +613,27 @@ async function leaveRoom() {
   state.myGuess = null;
   sessionStorage.removeItem("impostor:room");
   render();
+}
+
+async function kickPlayer(playerId) {
+  if (!isHost() || !playerId || playerId === state.uid) return;
+  const player = getPlayers(state.room).find((item) => item.id === playerId);
+  await updateRoot({
+    [`rooms/${state.roomCode}/players/${playerId}/kicked`]: true,
+    [`rooms/${state.roomCode}/players/${playerId}/online`]: false,
+    [`rooms/${state.roomCode}/players/${playerId}/kickedAt`]: Date.now(),
+    ...(player?.identityKey || player?.passwordHash
+      ? { [`rooms/${state.roomCode}/kickedKeys/${player.identityKey || player.passwordHash}`]: true }
+      : {}),
+    [`assignments/${state.roomCode}/${playerId}`]: null,
+    [`votes/${state.roomCode}/current/${playerId}`]: null,
+    [`guesses/${state.roomCode}/${playerId}`]: null,
+    [`rooms/${state.roomCode}/voteReceipts/current/${playerId}`]: null,
+    [`rooms/${state.roomCode}/guessReceipts/${playerId}`]: null,
+    [`rooms/${state.roomCode}/meta/updatedAt`]: Date.now(),
+  });
+  state.copyMessage = `${player?.name || "Oyuncu"} odadan atildi.`;
+  setTimeout(resolveVotes, 80);
 }
 
 async function copyCode() {
@@ -651,6 +696,7 @@ async function startGame() {
     result: null,
     "meta/word": word,
     "meta/phase": "reveal",
+    "meta/phaseEndsAt": null,
     "meta/round": (state.room.meta?.round || 0) + 1,
     "meta/updatedAt": Date.now(),
   });
@@ -665,7 +711,7 @@ async function startGame() {
 async function setPhase(phase) {
   if (!isHost()) return;
   await updateRoom({
-    "meta/phase": phase,
+    ...phaseMetaPatch(phase),
     "meta/updatedAt": Date.now(),
   });
 }
@@ -675,7 +721,7 @@ async function beginVote() {
   await updateRoot({
     [`rooms/${state.roomCode}/voteReceipts/current`]: null,
     [`votes/${state.roomCode}/current`]: null,
-    [`rooms/${state.roomCode}/meta/phase`]: "voting",
+    ...prefixRoomUpdate(phaseMetaPatch("voting")),
     [`rooms/${state.roomCode}/meta/updatedAt`]: Date.now(),
   });
 }
@@ -758,6 +804,12 @@ async function resolveVotes() {
     return;
   }
 
+  await eliminateByVote(eliminatedId);
+}
+
+async function eliminateByVote(eliminatedId) {
+  const room = state.room;
+  const activePlayers = getPlayers(room).filter((player) => !player.eliminated);
   const assignment = await readAssignment(eliminatedId);
   const eliminated = activePlayers.find((player) => player.id === eliminatedId);
   const playersWon = assignment?.role === "impostor";
@@ -774,6 +826,30 @@ async function resolveVotes() {
   });
 }
 
+async function finishVotingByTimeout() {
+  if (!isHost() || state.room?.meta?.phase !== "voting") return;
+  const activePlayers = getPlayers(state.room).filter((player) => !player.eliminated);
+  const votes = await readVotes();
+  const counts = {};
+
+  Object.values(votes).forEach((vote) => {
+    if (vote?.targetId && activePlayers.some((player) => player.id === vote.targetId)) {
+      counts[vote.targetId] = (counts[vote.targetId] || 0) + 1;
+    }
+  });
+
+  const threshold = majority(activePlayers.length);
+  const eliminatedId = Object.keys(counts).find((id) => counts[id] >= threshold);
+  if (eliminatedId) {
+    await eliminateByVote(eliminatedId);
+    return;
+  }
+
+  await updateRoom(
+    resultUpdate("impostor", "Impostor kazandi", "Sure bitti ve oyuncular birini atacak cogunluga ulasamadi."),
+  );
+}
+
 async function resetToLobby() {
   if (!isHost()) return;
   const playerUpdates = {};
@@ -787,6 +863,7 @@ async function resetToLobby() {
       result: null,
       guessReceipts: null,
       "meta/phase": "lobby",
+      "meta/phaseEndsAt": null,
       "meta/word": "",
       "meta/updatedAt": Date.now(),
     }),
@@ -819,9 +896,22 @@ async function subscribeRoom(code) {
         sessionStorage.removeItem("impostor:room");
         state.error = "Oda kapatilmis ya da bulunamiyor.";
       }
+      if (state.room?.players?.[state.uid]?.kicked) {
+        cleanupSubscriptions();
+        state.roomCode = "";
+        state.room = null;
+        state.assignment = null;
+        state.myVote = null;
+        state.myGuess = null;
+        sessionStorage.removeItem("impostor:room");
+        state.error = "Oda sahibi seni odadan atti.";
+        render();
+        return;
+      }
       render();
       if (state.room?.meta?.phase === "discussion") resolveGuesses();
       if (state.room?.meta?.phase === "voting") resolveVotes();
+      resolvePhaseTimeout();
     }),
   );
 
@@ -890,6 +980,38 @@ async function readAssignment(playerId) {
   return snapshot.val();
 }
 
+async function readRoomPublic(code) {
+  const { ref, get } = state.firebase.dbModule;
+  const snapshot = await get(ref(state.firebase.db, `rooms/${code}`));
+  return snapshot.val() || {};
+}
+
+async function canUseIdentityInRoom(code) {
+  const room = await readRoomPublic(code);
+  if (room.kickedKeys?.[identityKey()]) {
+    state.error = "Bu isim ve sifreyle bu odadan atildin; tekrar katilamazsin.";
+    render();
+    return false;
+  }
+
+  const duplicate = Object.entries(room.players || {})
+    .map(([id, player]) => ({ id, ...player }))
+    .find(
+      (player) =>
+        player.id !== state.uid &&
+        !player.kicked &&
+        cleanName(player.name || "").toLocaleLowerCase("tr") === local.name.toLocaleLowerCase("tr"),
+    );
+
+  if (duplicate && duplicate.passwordHash !== local.passwordHash) {
+    state.error = "Bu isim odada baska bir sifreyle kullaniliyor.";
+    render();
+    return false;
+  }
+
+  return true;
+}
+
 async function roomExists(code) {
   const { ref, get } = state.firebase.dbModule;
   const snapshot = await get(ref(state.firebase.db, `rooms/${code}/meta/code`));
@@ -914,6 +1036,7 @@ function resultUpdate(winner, title, body, eliminatedName = "") {
       at: Date.now(),
     },
     "meta/phase": "ended",
+    "meta/phaseEndsAt": null,
     "meta/updatedAt": Date.now(),
   };
 }
@@ -922,18 +1045,91 @@ function prefixRoomUpdate(patch) {
   return Object.fromEntries(Object.entries(patch).map(([key, value]) => [`rooms/${state.roomCode}/${key}`, value]));
 }
 
+function phaseMetaPatch(phase) {
+  return {
+    "meta/phase": phase,
+    "meta/phaseEndsAt": phaseEndAt(phase),
+  };
+}
+
+function phaseEndAt(phase) {
+  const settings = state.room?.settings || defaultSettings();
+  if (!settings.timerEnabled) return null;
+  if (phase === "discussion") return Date.now() + clampNumber(settings.discussionSeconds, 60, 1800) * 1000;
+  if (phase === "voting") return Date.now() + clampNumber(settings.votingSeconds, 15, 300) * 1000;
+  return null;
+}
+
+function timerNotice(room) {
+  const endsAt = room?.meta?.phaseEndsAt;
+  if (!room?.settings?.timerEnabled || !endsAt) return "";
+  return `
+    <div class="timer-line">
+      <span>Kalan sure</span>
+      <strong>${formatRemaining(endsAt - Date.now())}</strong>
+    </div>
+  `;
+}
+
+function syncUiTimer() {
+  if (state.uiTimer) {
+    clearInterval(state.uiTimer);
+    state.uiTimer = null;
+  }
+
+  if (!state.room?.settings?.timerEnabled || !state.room?.meta?.phaseEndsAt) return;
+
+  state.uiTimer = setInterval(() => {
+    if (!state.room?.meta?.phaseEndsAt) {
+      clearInterval(state.uiTimer);
+      state.uiTimer = null;
+      return;
+    }
+    render();
+    resolvePhaseTimeout();
+  }, 1000);
+}
+
+async function resolvePhaseTimeout() {
+  if (!isHost() || state.timeoutResolving) return;
+  const phase = state.room?.meta?.phase;
+  const endsAt = state.room?.meta?.phaseEndsAt;
+  if (!endsAt || Date.now() < endsAt) return;
+
+  state.timeoutResolving = true;
+  try {
+    if (phase === "discussion") await beginVote();
+    if (phase === "voting") await finishVotingByTimeout();
+  } finally {
+    state.timeoutResolving = false;
+  }
+}
+
+function formatRemaining(milliseconds) {
+  const total = Math.max(0, Math.ceil(milliseconds / 1000));
+  const minutes = Math.floor(total / 60);
+  const seconds = String(total % 60).padStart(2, "0");
+  return `${minutes}:${seconds}`;
+}
+
 function defaultSettings() {
   return {
     words: DEFAULT_WORDS,
     impostorCount: 1,
+    timerEnabled: false,
+    discussionSeconds: 300,
+    votingSeconds: 60,
   };
 }
 
 function playerRecord() {
   return {
     name: local.name,
+    passwordHash: local.passwordHash,
+    identityKey: identityKey(),
     online: true,
     eliminated: false,
+    kicked: false,
     lastSeen: Date.now(),
   };
 }
@@ -941,6 +1137,7 @@ function playerRecord() {
 function getPlayers(room) {
   return Object.entries(room?.players || {})
     .map(([id, player]) => ({ id, ...player }))
+    .filter((player) => !player.kicked)
     .sort((a, b) => (a.name || "").localeCompare(b.name || "", "tr"));
 }
 
@@ -955,14 +1152,39 @@ function ensureReady() {
   return false;
 }
 
-async function saveNameFromCurrentInput() {
+function saveIdentityFromCurrentInput({ requirePassword = false } = {}) {
   const input = document.querySelector("#nameInput");
-  if (!input) return;
-  const nextName = cleanName(input.value);
-  if (nextName && nextName !== local.name) {
-    local.name = nextName;
-    localStorage.setItem("impostor:name", nextName);
+  const passwordInput = document.querySelector("#passwordInput");
+  const nextName = cleanName(input?.value || "");
+  const nextPassword = passwordInput?.value || "";
+
+  if (!nextName) {
+    state.error = "Oyuna girmek icin bir isim yazmalisin.";
+    render();
+    return false;
   }
+
+  if (nextPassword && nextPassword.length < 3) {
+    state.error = "Sifre en az 3 karakter olsun.";
+    render();
+    return false;
+  }
+
+  if (requirePassword && !nextPassword && !local.passwordHash) {
+    state.error = "Oyuna girmek icin kendi sifreni belirlemelisin.";
+    render();
+    return false;
+  }
+
+  local.name = nextName;
+  localStorage.setItem("impostor:name", nextName);
+
+  if (nextPassword) {
+    local.passwordHash = simpleHash(nextPassword);
+    localStorage.setItem("impostor:passwordHash", local.passwordHash);
+  }
+
+  return true;
 }
 
 function majority(count) {
@@ -981,10 +1203,20 @@ function readSettingsFromForm(fallback) {
   const formWords = document.querySelector("#wordPool")?.value;
   const words = formWords ? parseWords(formWords) : fallback.words || DEFAULT_WORDS;
   const impostorCount = Number(document.querySelector("#impostorCount")?.value || fallback.impostorCount || 1);
+  const discussionMinutes = Number(document.querySelector("#discussionMinutes")?.value || (fallback.discussionSeconds || 300) / 60);
+  const votingSeconds = Number(document.querySelector("#votingSeconds")?.value || fallback.votingSeconds || 60);
   return {
     words,
     impostorCount: Math.min(Math.max(impostorCount, 1), 2),
+    timerEnabled: Boolean(document.querySelector("#timerEnabled")?.checked),
+    discussionSeconds: clampNumber(Math.round(discussionMinutes * 60), 60, 1800),
+    votingSeconds: clampNumber(Math.round(votingSeconds), 15, 300),
   };
+}
+
+function clampNumber(value, min, max) {
+  const number = Number.isFinite(value) ? value : min;
+  return Math.min(Math.max(number, min), max);
 }
 
 function normalizeCode(value) {
@@ -1000,6 +1232,19 @@ function createLocalId() {
   if (globalThis.crypto?.randomUUID) return globalThis.crypto.randomUUID();
   const random = Math.random().toString(36).slice(2);
   return `local-${Date.now().toString(36)}-${random}`;
+}
+
+function simpleHash(value) {
+  let hash = 2166136261;
+  for (let index = 0; index < value.length; index += 1) {
+    hash ^= value.charCodeAt(index);
+    hash = Math.imul(hash, 16777619);
+  }
+  return (hash >>> 0).toString(36);
+}
+
+function identityKey() {
+  return simpleHash(`${local.name.toLocaleLowerCase("tr")}:${local.passwordHash}`);
 }
 
 function cleanName(value) {

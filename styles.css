@@ -64,6 +64,13 @@ button:disabled {
   transform: none;
 }
 
+.mini {
+  min-height: 28px;
+  padding: 0 9px;
+  border-radius: 999px;
+  font-size: 12px;
+}
+
 .ghost {
   background: #2a2e38;
   color: var(--text);
@@ -215,6 +222,15 @@ h3 {
   font-size: 13px;
 }
 
+.check-field {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  min-height: 44px;
+  margin-bottom: 13px;
+  color: var(--muted);
+}
+
 input,
 textarea,
 select {
@@ -226,6 +242,14 @@ select {
   outline: none;
   color: var(--text);
   background: #11141a;
+}
+
+.check-field input {
+  width: 18px;
+  min-height: 18px;
+  flex: 0 0 auto;
+  padding: 0;
+  accent-color: var(--accent);
 }
 
 textarea {
@@ -357,6 +381,28 @@ select:focus {
   padding: 4px 8px;
   color: var(--muted);
   font-size: 12px;
+}
+
+.timer-line {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  border: 1px solid rgba(242, 193, 78, 0.42);
+  border-radius: 7px;
+  padding: 12px 14px;
+  background: rgba(242, 193, 78, 0.09);
+}
+
+.timer-line span {
+  color: var(--muted);
+  font-size: 13px;
+}
+
+.timer-line strong {
+  color: var(--accent);
+  font-size: 28px;
+  font-variant-numeric: tabular-nums;
 }
 
 .vote-list {
