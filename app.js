@@ -347,6 +347,7 @@ function gameView({ room, players, me, isHost, phase }) {
           <div class="actions">
             <button class="ghost" id="copyCode">Kodu kopyala</button>
             <button class="ghost" id="leaveRoom">Odadan cik</button>
+            ${isHost ? `<button class="ghost" id="resetScores">Puanlari sifirla</button>` : ""}
           </div>
           ${state.copyMessage ? `<p class="footer-note">${escapeHtml(state.copyMessage)}</p>` : ""}
           ${me ? "" : `<p class="footer-note">Bu odada adin gorunmuyor; yeniden katilmayi dene.</p>`}
@@ -557,7 +558,7 @@ function discussionStage(room) {
 }
 
 function votingStage(room, players) {
-  const voteReceipts = room.voteReceipts?.current || {};
+  const voteReceipts = currentRoundBucket(room.voteReceipts) || {};
   const activePlayers = players.filter((player) => !player.eliminated);
   const voteCount = Object.entries(voteReceipts).filter(
     ([id, receipt]) => activePlayers.some((player) => player.id === id) && isCurrentRoundRecord(receipt),
@@ -649,6 +650,7 @@ function bindEvents() {
   bind("#joinRoom", "click", joinRoom);
   bind("#leaveRoom", "click", leaveRoom);
   bind("#copyCode", "click", copyCode);
+  bind("#resetScores", "click", resetScores);
   bind("#saveSettings", "click", saveSettings);
   bind("#startGame", "click", startGame);
   bind("#toggleReady", "click", toggleReady);
@@ -812,9 +814,9 @@ async function kickPlayer(playerId) {
       : {}),
     [`assignmentsPublic/${playerId}`]: null,
     [`players/${playerId}/assignment`]: null,
-    [`votesPublic/current/${playerId}`]: null,
+    [`votesPublic/${roundKey()}/${playerId}`]: null,
     [`guessesPublic/${playerId}`]: null,
-    [`voteReceipts/current/${playerId}`]: null,
+    [`voteReceipts/${roundKey()}/${playerId}`]: null,
     [`guessReceipts/${playerId}`]: null,
     "meta/updatedAt": Date.now(),
   });
@@ -835,6 +837,21 @@ async function copyCode() {
   } catch {
     state.copyMessage = `Kod: ${state.roomCode}`;
   }
+  render();
+}
+
+async function resetScores() {
+  if (!isHost() || !state.roomCode) return;
+  const scorePatch = {};
+  getPlayers(state.room).forEach((player) => {
+    scorePatch[`players/${player.id}/score`] = 0;
+  });
+
+  await updateRoom({
+    ...scorePatch,
+    "meta/updatedAt": Date.now(),
+  });
+  state.copyMessage = "Puanlar sifirlandi.";
   render();
 }
 
@@ -965,6 +982,8 @@ async function resolveSeenCards() {
 
 async function beginVote() {
   await updateRoom({
+    [`voteReceipts/${roundKey()}`]: null,
+    [`votesPublic/${roundKey()}`]: null,
     "voteReceipts/current": null,
     "votesPublic/current": null,
     voteStartRequests: null,
@@ -972,6 +991,7 @@ async function beginVote() {
     "meta/updatedAt": Date.now(),
   });
   await bestEffortRootUpdate({
+    [`votes/${state.roomCode}/${roundKey()}`]: null,
     [`votes/${state.roomCode}/current`]: null,
   });
 }
@@ -1021,15 +1041,17 @@ async function writePrivateVote(targetId) {
     at: Date.now(),
   };
   await updateRoom({
-    [`votesPublic/current/${state.uid}`]: voteRecord,
-    [`voteReceipts/current/${state.uid}`]: {
+    [`votesPublic/${roundKey()}/${state.uid}`]: voteRecord,
+    [`voteReceipts/${roundKey()}/${state.uid}`]: {
       round: state.room?.meta?.round || 0,
       at: Date.now(),
     },
+    "votesPublic/current": null,
+    "voteReceipts/current": null,
     "meta/updatedAt": Date.now(),
   });
   await bestEffortRootUpdate({
-    [`votes/${state.roomCode}/current/${state.uid}`]: voteRecord,
+    [`votes/${state.roomCode}/${roundKey()}/${state.uid}`]: voteRecord,
   });
 }
 
@@ -1096,11 +1118,14 @@ async function resolveVotes() {
     const allVoted = activePlayers.every((player) => votes[player.id]);
     if (allVoted && isHost()) {
       await updateRoom({
+        [`votesPublic/${roundKey()}`]: null,
+        [`voteReceipts/${roundKey()}`]: null,
         "votesPublic/current": null,
         "voteReceipts/current": null,
         "meta/updatedAt": Date.now(),
       });
       await bestEffortRootUpdate({
+        [`votes/${state.roomCode}/${roundKey()}`]: null,
         [`votes/${state.roomCode}/current`]: null,
       });
     }
@@ -1237,8 +1262,9 @@ async function subscribeRoom(code) {
       if (fallbackAssignment) {
         state.assignment = fallbackAssignment;
       }
-      if (isCurrentRoundRecord(state.room?.votesPublic?.current?.[state.uid])) {
-        state.myVote = state.room.votesPublic.current[state.uid];
+      const roomVote = currentRoundBucket(state.room?.votesPublic)?.[state.uid];
+      if (isCurrentRoundRecord(roomVote)) {
+        state.myVote = roomVote;
       }
       if (state.room?.guessesPublic?.[state.uid]) {
         state.myGuess = state.room.guessesPublic[state.uid];
@@ -1262,8 +1288,8 @@ async function subscribeRoom(code) {
   );
 
   state.unsubscribers.push(
-    onValue(ref(state.firebase.db, `votes/${code}/current/${state.uid}`), (snapshot) => {
-      const nextVote = snapshot.val() || state.room?.votesPublic?.current?.[state.uid] || null;
+    onValue(ref(state.firebase.db, `votes/${code}/${roundKey()}/${state.uid}`), (snapshot) => {
+      const nextVote = snapshot.val() || currentRoundBucket(state.room?.votesPublic)?.[state.uid] || null;
       state.myVote = isCurrentRoundRecord(nextVote) ? nextVote : null;
       render();
     }),
@@ -1320,10 +1346,10 @@ async function bestEffortRootUpdate(patch) {
 async function readVotes() {
   const { ref, get } = state.firebase.dbModule;
   try {
-    const snapshot = await get(ref(state.firebase.db, `votes/${state.roomCode}/current`));
-    return currentRoundRecords(snapshot.val() || state.room?.votesPublic?.current || {});
+    const snapshot = await get(ref(state.firebase.db, `votes/${state.roomCode}/${roundKey()}`));
+    return currentRoundRecords(snapshot.val() || currentRoundBucket(state.room?.votesPublic) || {});
   } catch {
-    return currentRoundRecords(state.room?.votesPublic?.current || {});
+    return currentRoundRecords(currentRoundBucket(state.room?.votesPublic) || {});
   }
 }
 
@@ -1639,6 +1665,14 @@ function pickImpostors(players, count, lastImpostorIds = []) {
 
 function currentRoundRecords(records) {
   return Object.fromEntries(Object.entries(records || {}).filter(([, record]) => isCurrentRoundRecord(record)));
+}
+
+function currentRoundBucket(container) {
+  return container?.[roundKey()] || {};
+}
+
+function roundKey() {
+  return `round-${Number(state.room?.meta?.round || 0)}`;
 }
 
 function isCurrentRoundRecord(record) {
