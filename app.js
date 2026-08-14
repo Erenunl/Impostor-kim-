@@ -81,7 +81,9 @@ async function boot() {
 
 function getConfig() {
   if (isUsableConfig(local.firebaseConfig)) return local.firebaseConfig;
-  return window.IMPOSTOR_FIREBASE_CONFIG || null;
+  if (isUsableConfig(window.IMPOSTOR_FIREBASE_CONFIG)) return window.IMPOSTOR_FIREBASE_CONFIG;
+  if (typeof firebaseConfig !== "undefined" && isUsableConfig(firebaseConfig)) return firebaseConfig;
+  return null;
 }
 
 async function connectFirebase(config) {
@@ -164,9 +166,9 @@ function setupView() {
         <div class="panel-inner">
           <h2>Config</h2>
           <label class="field">
-            <span>Firebase web app config JSON</span>
-            <textarea id="firebaseConfigInput" spellcheck="false" placeholder='{"apiKey":"...","databaseURL":"..."}'>${escapeHtml(
-              JSON.stringify(local.firebaseConfig || window.IMPOSTOR_FIREBASE_CONFIG || {}, null, 2),
+            <span>Firebase web app config veya komple snippet</span>
+            <textarea id="firebaseConfigInput" spellcheck="false" placeholder='const firebaseConfig = { apiKey: "...", databaseURL: "..." }'>${escapeHtml(
+              JSON.stringify(local.firebaseConfig || getConfig() || window.IMPOSTOR_FIREBASE_CONFIG || {}, null, 2),
             )}</textarea>
           </label>
           <div class="actions">
@@ -484,7 +486,7 @@ function bind(selector, event, handler) {
 async function saveConfig() {
   const input = document.querySelector("#firebaseConfigInput");
   try {
-    const parsed = JSON.parse(input.value);
+    const parsed = parseFirebaseConfigInput(input.value);
     if (!isUsableConfig(parsed)) throw new Error("Eksik config");
     localStorage.setItem("impostor:firebaseConfig", JSON.stringify(parsed));
     local.firebaseConfig = parsed;
@@ -493,7 +495,7 @@ async function saveConfig() {
     render();
     await boot();
   } catch {
-    state.error = "Config JSON eksik ya da hatali gorunuyor.";
+    state.error = "Config eksik ya da hatali gorunuyor. Firebase'in verdigi config objesini komple yapistirabilirsin.";
     render();
   }
 }
@@ -1024,6 +1026,26 @@ function pick(items) {
 
 function isUsableConfig(config) {
   return Boolean(config?.apiKey && config?.databaseURL && config?.projectId && config?.appId);
+}
+
+function parseFirebaseConfigInput(value) {
+  const text = value.trim();
+  if (!text) return null;
+
+  try {
+    return JSON.parse(text);
+  } catch {
+    const objectText = extractObjectLiteral(text);
+    if (!objectText) throw new Error("Config bulunamadi");
+    return Function(`"use strict"; return (${objectText});`)();
+  }
+}
+
+function extractObjectLiteral(text) {
+  const start = text.indexOf("{");
+  const end = text.lastIndexOf("}");
+  if (start === -1 || end === -1 || end <= start) return "";
+  return text.slice(start, end + 1);
 }
 
 function readJson(value) {
