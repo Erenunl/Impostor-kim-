@@ -1,4 +1,4 @@
-const firebaseConfig = {
+window.IMPOSTOR_FIREBASE_CONFIG = {
   apiKey: "AIzaSyDXo8fsy5qNf4FD2CXgZ4-6zgOMMDra-Ok",
   authDomain: "impostor-kim.firebaseapp.com",
   databaseURL: "https://impostor-kim-default-rtdb.europe-west1.firebasedatabase.app/",
