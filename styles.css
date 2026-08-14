@@ -157,6 +157,12 @@ h3 {
   gap: 8px;
 }
 
+.status-stack {
+  display: grid;
+  justify-items: end;
+  gap: 7px;
+}
+
 .chip {
   display: inline-flex;
   min-height: 32px;
@@ -172,6 +178,21 @@ h3 {
 
 .chip strong {
   color: var(--text);
+}
+
+.role-reminder {
+  max-width: 360px;
+  border: 1px solid rgba(72, 198, 168, 0.45);
+  border-radius: 999px;
+  padding: 6px 11px;
+  color: var(--text);
+  background: rgba(72, 198, 168, 0.1);
+  font-size: 13px;
+  font-weight: 800;
+  overflow: hidden;
+  text-align: right;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 
 .grid {
@@ -469,6 +490,15 @@ select:focus {
   .title-line {
     align-items: flex-start;
     flex-direction: column;
+  }
+
+  .status-stack {
+    justify-items: start;
+  }
+
+  .role-reminder {
+    max-width: calc(100vw - 22px);
+    text-align: left;
   }
 
   .grid,

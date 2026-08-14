@@ -237,6 +237,7 @@ function render() {
   const isHost = Boolean(room && room.meta?.hostId === state.uid);
   const phase = room?.meta?.phase || "home";
   const ready = Boolean(state.firebase);
+  const reminder = roleReminder(phase);
 
   app.innerHTML = `
     <header class="topbar">
@@ -247,10 +248,13 @@ function render() {
           <div class="muted">Oda kodu, gizli kelime, sessiz oylama.</div>
         </div>
       </div>
-      <div class="chip-row">
-        <span class="chip"><strong>${ready ? "Canli" : "Kurulum gerekli"}</strong></span>
-        ${room ? `<span class="chip">Oda <strong>${escapeHtml(state.roomCode)}</strong></span>` : ""}
-        ${room ? `<span class="chip">${PHASE_LABELS[phase] || "Bekliyor"}</span>` : ""}
+      <div class="status-stack">
+        <div class="chip-row">
+          <span class="chip"><strong>${ready ? "Canli" : "Kurulum gerekli"}</strong></span>
+          ${room ? `<span class="chip">Oda <strong>${escapeHtml(state.roomCode)}</strong></span>` : ""}
+          ${room ? `<span class="chip">${PHASE_LABELS[phase] || "Bekliyor"}</span>` : ""}
+        </div>
+        ${reminder ? `<div class="role-reminder">${escapeHtml(reminder)}</div>` : ""}
       </div>
     </header>
 
@@ -745,19 +749,24 @@ async function leaveRoom() {
 async function kickPlayer(playerId) {
   if (!isHost() || !playerId || playerId === state.uid) return;
   const player = getPlayers(state.room).find((item) => item.id === playerId);
-  await updateRoot({
-    [`rooms/${state.roomCode}/players/${playerId}/kicked`]: true,
-    [`rooms/${state.roomCode}/players/${playerId}/online`]: false,
-    [`rooms/${state.roomCode}/players/${playerId}/kickedAt`]: Date.now(),
+  await updateRoom({
+    [`players/${playerId}/kicked`]: true,
+    [`players/${playerId}/online`]: false,
+    [`players/${playerId}/kickedAt`]: Date.now(),
     ...(player?.identityKey || player?.passwordHash
-      ? { [`rooms/${state.roomCode}/kickedKeys/${player.identityKey || player.passwordHash}`]: true }
+      ? { [`kickedKeys/${player.identityKey || player.passwordHash}`]: true }
       : {}),
+    [`assignmentsPublic/${playerId}`]: null,
+    [`votesPublic/current/${playerId}`]: null,
+    [`guessesPublic/${playerId}`]: null,
+    [`voteReceipts/current/${playerId}`]: null,
+    [`guessReceipts/${playerId}`]: null,
+    "meta/updatedAt": Date.now(),
+  });
+  await bestEffortRootUpdate({
     [`assignments/${state.roomCode}/${playerId}`]: null,
     [`votes/${state.roomCode}/current/${playerId}`]: null,
     [`guesses/${state.roomCode}/${playerId}`]: null,
-    [`rooms/${state.roomCode}/voteReceipts/current/${playerId}`]: null,
-    [`rooms/${state.roomCode}/guessReceipts/${playerId}`]: null,
-    [`rooms/${state.roomCode}/meta/updatedAt`]: Date.now(),
   });
   state.copyMessage = `${player?.name || "Oyuncu"} odadan atildi.`;
   setTimeout(resolveVotes, 80);
@@ -819,8 +828,12 @@ async function startGame() {
 
   await updateRoom({
     settings,
+    assignmentsPublic: assignments,
+    guessesPublic: null,
+    votesPublic: null,
     [`usedWords/${wordKey(word)}`]: true,
     voteReceipts: null,
+    guessReceipts: null,
     result: null,
     "meta/word": word,
     "meta/phase": "reveal",
@@ -829,7 +842,8 @@ async function startGame() {
     "meta/updatedAt": Date.now(),
   });
 
-  await updateRoot({
+  state.assignment = assignments[state.uid] || null;
+  await bestEffortRootUpdate({
     [`assignments/${state.roomCode}`]: assignments,
     [`guesses/${state.roomCode}`]: null,
     [`votes/${state.roomCode}`]: null,
@@ -846,11 +860,14 @@ async function setPhase(phase) {
 
 async function beginVote() {
   if (!isHost()) return;
-  await updateRoot({
-    [`rooms/${state.roomCode}/voteReceipts/current`]: null,
+  await updateRoom({
+    "voteReceipts/current": null,
+    "votesPublic/current": null,
+    ...phaseMetaPatch("voting"),
+    "meta/updatedAt": Date.now(),
+  });
+  await bestEffortRootUpdate({
     [`votes/${state.roomCode}/current`]: null,
-    ...prefixRoomUpdate(phaseMetaPatch("voting")),
-    [`rooms/${state.roomCode}/meta/updatedAt`]: Date.now(),
   });
 }
 
@@ -861,14 +878,33 @@ async function submitGuess() {
   if (!guess) return;
 
   const correct = guess === word;
-  await updateRoot({
-    [`guesses/${state.roomCode}/${state.uid}`]: {
-      guess,
-      correct,
-      at: Date.now(),
-    },
-    [`rooms/${state.roomCode}/guessReceipts/${state.uid}`]: true,
-    [`rooms/${state.roomCode}/meta/updatedAt`]: Date.now(),
+  const guessRecord = {
+    guess,
+    correct,
+    at: Date.now(),
+  };
+  await updateRoom({
+    [`guessesPublic/${state.uid}`]: guessRecord,
+    [`guessReceipts/${state.uid}`]: true,
+    "meta/updatedAt": Date.now(),
+  });
+  await bestEffortRootUpdate({
+    [`guesses/${state.roomCode}/${state.uid}`]: guessRecord,
+  });
+}
+
+async function writePrivateVote(targetId) {
+  const voteRecord = {
+    targetId,
+    at: Date.now(),
+  };
+  await updateRoom({
+    [`votesPublic/current/${state.uid}`]: voteRecord,
+    [`voteReceipts/current/${state.uid}`]: true,
+    "meta/updatedAt": Date.now(),
+  });
+  await bestEffortRootUpdate({
+    [`votes/${state.roomCode}/current/${state.uid}`]: voteRecord,
   });
 }
 
@@ -877,14 +913,7 @@ async function castVote(targetId) {
   const activePlayers = getPlayers(state.room).filter((player) => !player.eliminated);
   if (!activePlayers.some((player) => player.id === targetId)) return;
 
-  await updateRoot({
-    [`votes/${state.roomCode}/current/${state.uid}`]: {
-      targetId,
-      at: Date.now(),
-    },
-    [`rooms/${state.roomCode}/voteReceipts/current/${state.uid}`]: true,
-    [`rooms/${state.roomCode}/meta/updatedAt`]: Date.now(),
-  });
+  await writePrivateVote(targetId);
 
   setTimeout(resolveVotes, 80);
 }
@@ -985,20 +1014,28 @@ async function resetToLobby() {
     playerUpdates[`players/${player.id}/eliminated`] = false;
   });
 
-  await updateRoot({
-    ...prefixRoomUpdate({
-      ...playerUpdates,
-      result: null,
-      guessReceipts: null,
-      "meta/phase": "lobby",
-      "meta/phaseEndsAt": null,
-      "meta/word": "",
-      "meta/updatedAt": Date.now(),
-    }),
+  await updateRoom({
+    ...playerUpdates,
+    result: null,
+    assignmentsPublic: null,
+    guessesPublic: null,
+    votesPublic: null,
+    guessReceipts: null,
+    voteReceipts: null,
+    "meta/phase": "lobby",
+    "meta/phaseEndsAt": null,
+    "meta/word": "",
+    "meta/updatedAt": Date.now(),
+  });
+
+  state.assignment = null;
+  state.myVote = null;
+  state.myGuess = null;
+
+  await bestEffortRootUpdate({
     [`assignments/${state.roomCode}`]: null,
     [`guesses/${state.roomCode}`]: null,
     [`votes/${state.roomCode}`]: null,
-    [`rooms/${state.roomCode}/voteReceipts`]: null,
   });
 }
 
@@ -1036,6 +1073,20 @@ async function subscribeRoom(code) {
         render();
         return;
       }
+      if (state.room?.meta?.phase === "lobby") {
+        state.assignment = null;
+        state.myVote = null;
+        state.myGuess = null;
+      }
+      if (state.room?.assignmentsPublic?.[state.uid]) {
+        state.assignment = state.room.assignmentsPublic[state.uid];
+      }
+      if (state.room?.votesPublic?.current?.[state.uid]) {
+        state.myVote = state.room.votesPublic.current[state.uid];
+      }
+      if (state.room?.guessesPublic?.[state.uid]) {
+        state.myGuess = state.room.guessesPublic[state.uid];
+      }
       render();
       if (state.room?.meta?.phase === "discussion") resolveGuesses();
       if (state.room?.meta?.phase === "voting") resolveVotes();
@@ -1045,21 +1096,21 @@ async function subscribeRoom(code) {
 
   state.unsubscribers.push(
     onValue(ref(state.firebase.db, `assignments/${code}/${state.uid}`), (snapshot) => {
-      state.assignment = snapshot.val();
+      state.assignment = snapshot.val() || state.room?.assignmentsPublic?.[state.uid] || null;
       render();
     }),
   );
 
   state.unsubscribers.push(
     onValue(ref(state.firebase.db, `votes/${code}/current/${state.uid}`), (snapshot) => {
-      state.myVote = snapshot.val();
+      state.myVote = snapshot.val() || state.room?.votesPublic?.current?.[state.uid] || null;
       render();
     }),
   );
 
   state.unsubscribers.push(
     onValue(ref(state.firebase.db, `guesses/${code}/${state.uid}`), (snapshot) => {
-      state.myGuess = snapshot.val();
+      state.myGuess = snapshot.val() || state.room?.guessesPublic?.[state.uid] || null;
       render();
     }),
   );
@@ -1090,22 +1141,42 @@ async function updateRoot(patch) {
   await update(ref(state.firebase.db), patch);
 }
 
+async function bestEffortRootUpdate(patch) {
+  try {
+    await updateRoot(patch);
+  } catch {
+    // Some rooms run with rules that only allow the public room tree.
+  }
+}
+
 async function readVotes() {
   const { ref, get } = state.firebase.dbModule;
-  const snapshot = await get(ref(state.firebase.db, `votes/${state.roomCode}/current`));
-  return snapshot.val() || {};
+  try {
+    const snapshot = await get(ref(state.firebase.db, `votes/${state.roomCode}/current`));
+    return snapshot.val() || state.room?.votesPublic?.current || {};
+  } catch {
+    return state.room?.votesPublic?.current || {};
+  }
 }
 
 async function readGuesses() {
   const { ref, get } = state.firebase.dbModule;
-  const snapshot = await get(ref(state.firebase.db, `guesses/${state.roomCode}`));
-  return snapshot.val() || {};
+  try {
+    const snapshot = await get(ref(state.firebase.db, `guesses/${state.roomCode}`));
+    return snapshot.val() || state.room?.guessesPublic || {};
+  } catch {
+    return state.room?.guessesPublic || {};
+  }
 }
 
 async function readAssignment(playerId) {
   const { ref, get } = state.firebase.dbModule;
-  const snapshot = await get(ref(state.firebase.db, `assignments/${state.roomCode}/${playerId}`));
-  return snapshot.val();
+  try {
+    const snapshot = await get(ref(state.firebase.db, `assignments/${state.roomCode}/${playerId}`));
+    return snapshot.val() || state.room?.assignmentsPublic?.[playerId] || null;
+  } catch {
+    return state.room?.assignmentsPublic?.[playerId] || null;
+  }
 }
 
 async function readRoomPublic(code) {
@@ -1171,6 +1242,12 @@ function resultUpdate(winner, title, body, eliminatedName = "") {
 
 function prefixRoomUpdate(patch) {
   return Object.fromEntries(Object.entries(patch).map(([key, value]) => [`rooms/${state.roomCode}/${key}`, value]));
+}
+
+function roleReminder(phase) {
+  if (!state.assignment || phase === "lobby" || phase === "home") return "";
+  if (state.assignment.role === "impostor") return "Rolun: Impostor";
+  return `Kelimen: ${state.assignment.word || ""}`;
 }
 
 function phaseMetaPatch(phase) {
