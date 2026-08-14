@@ -482,13 +482,14 @@ function lobbyStage(room, players, isHost) {
 }
 
 function revealStage(isHost) {
-  const isImpostor = state.assignment?.role === "impostor";
+  const assignment = currentAssignment();
+  const isImpostor = assignment?.role === "impostor";
   return `
     <div class="game-stage">
       <div class="role-card ${isImpostor ? "impostor" : "player"}">
         <div>
           <div class="role-label">${isImpostor ? "Gizli rolun" : "Kelimen"}</div>
-          <div class="secret-word">${isImpostor ? "Impostor ???" : escapeHtml(state.assignment?.word || "Bekleniyor")}</div>
+          <div class="secret-word">${isImpostor ? "Impostor ???" : escapeHtml(assignment?.word || "Bekleniyor")}</div>
         </div>
       </div>
       <div class="actions">
@@ -503,7 +504,7 @@ function revealStage(isHost) {
 }
 
 function discussionStage(room, isHost) {
-  const isImpostor = state.assignment?.role === "impostor";
+  const isImpostor = currentAssignment()?.role === "impostor";
   const guessed = Boolean(state.myGuess);
   return `
     <div class="game-stage">
@@ -757,6 +758,7 @@ async function kickPlayer(playerId) {
       ? { [`kickedKeys/${player.identityKey || player.passwordHash}`]: true }
       : {}),
     [`assignmentsPublic/${playerId}`]: null,
+    [`players/${playerId}/assignment`]: null,
     [`votesPublic/current/${playerId}`]: null,
     [`guessesPublic/${playerId}`]: null,
     [`voteReceipts/current/${playerId}`]: null,
@@ -819,15 +821,18 @@ async function startGame() {
   const word = pickUnusedWord(settings.words || DEFAULT_WORDS, state.room?.usedWords || {});
   const impostors = shuffle(players).slice(0, impostorCount).map((player) => player.id);
   const assignments = {};
+  const playerAssignmentUpdates = {};
   players.forEach((player) => {
     assignments[player.id] = {
       role: impostors.includes(player.id) ? "impostor" : "player",
       word,
     };
+    playerAssignmentUpdates[`players/${player.id}/assignment`] = assignments[player.id];
   });
 
   await updateRoom({
     settings,
+    ...playerAssignmentUpdates,
     assignmentsPublic: assignments,
     guessesPublic: null,
     votesPublic: null,
@@ -952,10 +957,13 @@ async function resolveVotes() {
   if (!eliminatedId) {
     const allVoted = activePlayers.every((player) => votes[player.id]);
     if (allVoted && isHost()) {
-      await updateRoot({
+      await updateRoom({
+        "votesPublic/current": null,
+        "voteReceipts/current": null,
+        "meta/updatedAt": Date.now(),
+      });
+      await bestEffortRootUpdate({
         [`votes/${state.roomCode}/current`]: null,
-        [`rooms/${state.roomCode}/voteReceipts/current`]: null,
-        [`rooms/${state.roomCode}/meta/updatedAt`]: Date.now(),
       });
     }
     return;
@@ -970,16 +978,16 @@ async function eliminateByVote(eliminatedId) {
   const assignment = await readAssignment(eliminatedId);
   const eliminated = activePlayers.find((player) => player.id === eliminatedId);
   const playersWon = assignment?.role === "impostor";
-  await updateRoot({
-    [`rooms/${state.roomCode}/players/${eliminatedId}/eliminated`]: true,
-    ...prefixRoomUpdate(resultUpdate(
+  await updateRoom({
+    [`players/${eliminatedId}/eliminated`]: true,
+    ...resultUpdate(
       playersWon ? "players" : "impostor",
       playersWon ? "Oyuncular kazandi" : "Impostor kazandi",
       playersWon
         ? `${eliminated?.name || "Bir oyuncu"} impostor olarak bulundu.`
         : `${eliminated?.name || "Bir oyuncu"} atildi ama impostor degildi.`,
       eliminated?.name || "",
-    )),
+    ),
   });
 }
 
@@ -1012,6 +1020,7 @@ async function resetToLobby() {
   const playerUpdates = {};
   getPlayers(state.room).forEach((player) => {
     playerUpdates[`players/${player.id}/eliminated`] = false;
+    playerUpdates[`players/${player.id}/assignment`] = null;
   });
 
   await updateRoom({
@@ -1078,8 +1087,9 @@ async function subscribeRoom(code) {
         state.myVote = null;
         state.myGuess = null;
       }
-      if (state.room?.assignmentsPublic?.[state.uid]) {
-        state.assignment = state.room.assignmentsPublic[state.uid];
+      const fallbackAssignment = assignmentFromRoom(state.uid);
+      if (fallbackAssignment) {
+        state.assignment = fallbackAssignment;
       }
       if (state.room?.votesPublic?.current?.[state.uid]) {
         state.myVote = state.room.votesPublic.current[state.uid];
@@ -1096,7 +1106,7 @@ async function subscribeRoom(code) {
 
   state.unsubscribers.push(
     onValue(ref(state.firebase.db, `assignments/${code}/${state.uid}`), (snapshot) => {
-      state.assignment = snapshot.val() || state.room?.assignmentsPublic?.[state.uid] || null;
+      state.assignment = snapshot.val() || assignmentFromRoom(state.uid) || null;
       render();
     }),
   );
@@ -1173,9 +1183,9 @@ async function readAssignment(playerId) {
   const { ref, get } = state.firebase.dbModule;
   try {
     const snapshot = await get(ref(state.firebase.db, `assignments/${state.roomCode}/${playerId}`));
-    return snapshot.val() || state.room?.assignmentsPublic?.[playerId] || null;
+    return snapshot.val() || assignmentFromRoom(playerId) || null;
   } catch {
-    return state.room?.assignmentsPublic?.[playerId] || null;
+    return assignmentFromRoom(playerId) || null;
   }
 }
 
@@ -1244,10 +1254,19 @@ function prefixRoomUpdate(patch) {
   return Object.fromEntries(Object.entries(patch).map(([key, value]) => [`rooms/${state.roomCode}/${key}`, value]));
 }
 
+function currentAssignment() {
+  return state.assignment || assignmentFromRoom(state.uid);
+}
+
+function assignmentFromRoom(playerId) {
+  return state.room?.players?.[playerId]?.assignment || state.room?.assignmentsPublic?.[playerId] || null;
+}
+
 function roleReminder(phase) {
-  if (!state.assignment || phase === "lobby" || phase === "home") return "";
-  if (state.assignment.role === "impostor") return "Rolun: Impostor";
-  return `Kelimen: ${state.assignment.word || ""}`;
+  const assignment = currentAssignment();
+  if (!assignment || phase === "lobby" || phase === "home") return "";
+  if (assignment.role === "impostor") return "Rolun: Impostor";
+  return `Kelimen: ${assignment.word || ""}`;
 }
 
 function phaseMetaPatch(phase) {
